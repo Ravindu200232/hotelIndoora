@@ -1,0 +1,16 @@
+[
+  { "ParameterKey": "AppName", "ParameterValue": "hotelindoora" },
+  { "ParameterKey": "EnvName", "ParameterValue": "prod" },
+  { "ParameterKey": "VpcId", "ParameterValue": "vpc-04b735bf9df6c1851" },
+  { "ParameterKey": "GatewaySubnetId", "ParameterValue": "subnet-0900fe0399ac839bc" },
+  { "ParameterKey": "AuthSubnetId", "ParameterValue": "subnet-05c4b6063519b440e" },
+  { "ParameterKey": "RoomsSubnetId", "ParameterValue": "subnet-01bbe4ec5b9638cbd" },
+  { "ParameterKey": "BookingsSubnetId", "ParameterValue": "subnet-0900fe0399ac839bc" },
+  { "ParameterKey": "CloudFrontOriginPrefixListId", "ParameterValue": "pl-9aa247f3" },
+  { "ParameterKey": "ReleaseBucketName", "ParameterValue": "hotelindoora-prod-releases" },
+  { "ParameterKey": "SecretName", "ParameterValue": "/hotelindoora/prod/env" },
+  { "ParameterKey": "GatewayInstanceType", "ParameterValue": "t4g.small" },
+  { "ParameterKey": "ServiceInstanceType", "ParameterValue": "t4g.micro" },
+  { "ParameterKey": "DiskSizeGb", "ParameterValue": "20" },
+  { "ParameterKey": "LogRetentionDays", "ParameterValue": "30" }
+]

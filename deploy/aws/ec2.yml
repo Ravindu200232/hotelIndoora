@@ -1,0 +1,979 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: hotelIndoora production - four EC2 instances (gateway, auth, rooms, bookings), nginx in front of each, HTTPS through CloudFront. No SSH, administration through Systems Manager.
+#
+# The one first-boot script is repeated for each instance (CloudFormation does
+# not allow YAML aliases). It reads its own service name and port from the
+# instance's own tags, so the four boots do the same thing.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: hotelindoora
+  EnvName:
+    Type: String
+    Default: prod
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  GatewaySubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AuthSubnetId:
+    Type: AWS::EC2::Subnet::Id
+  RoomsSubnetId:
+    Type: AWS::EC2::Subnet::Id
+  BookingsSubnetId:
+    Type: AWS::EC2::Subnet::Id
+  CloudFrontOriginPrefixListId:
+    Type: String
+  ReleaseBucketName:
+    Type: String
+  SecretName:
+    Type: String
+  GatewayInstanceType:
+    Type: String
+    Default: t4g.small
+  ServiceInstanceType:
+    Type: String
+    Default: t4g.micro
+  DiskSizeGb:
+    Type: Number
+    Default: 20
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+
+Resources:
+
+  ReleaseBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ReleaseBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-releases
+            Status: Enabled
+            Prefix: releases/
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AppName}-${EnvName}-instance'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: read-this-applications-release-and-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadReleases
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub '${ReleaseBucket.Arn}/releases/*'
+              - Sid: ListReleases
+                Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: !GetAtt ReleaseBucket.Arn
+              - Sid: ReadThisApplicationsSecret
+                Effect: Allow
+                Action: [secretsmanager:GetSecretValue, secretsmanager:DescribeSecret]
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}-*'
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AppName}/${EnvName}/*'
+              - Sid: TagOwnRootVolumeForSnapshots
+                Effect: Allow
+                Action: [ec2:CreateTags, ec2:DescribeVolumes]
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AppName}-${EnvName}-instance'
+      Roles: [!Ref InstanceRole]
+
+  # The gateway accepts a browser-facing request only from CloudFront's own
+  # origin-facing addresses; nothing else on the internet can open it.
+  GatewaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AppName} ${EnvName} gateway - port 80 from CloudFront only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontOriginPrefixListId
+          Description: CloudFront origin-facing only
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: outbound to the database, Systems Manager and this application's services
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-gateway-sg' }
+
+  # Each service takes traffic only from the gateway, and its own process is
+  # bound to loopback behind nginx, so it has no public door at all.
+  AuthSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AppName} ${EnvName} auth - port 80 from the gateway only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref GatewaySecurityGroup
+          Description: the gateway only
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-auth-sg' }
+
+  RoomsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AppName} ${EnvName} rooms - port 80 from the gateway only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref GatewaySecurityGroup
+          Description: the gateway only
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-rooms-sg' }
+
+  BookingsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AppName} ${EnvName} bookings - port 80 from the gateway only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref GatewaySecurityGroup
+          Description: the gateway only
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-bookings-sg' }
+
+  GatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${AppName}/${EnvName}/gateway'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  AuthLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${AppName}/${EnvName}/auth'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  RoomsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${AppName}/${EnvName}/rooms'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  BookingsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${AppName}/${EnvName}/bookings'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  GatewayInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: InstanceProfile
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref GatewayInstanceType
+      SubnetId: !Ref GatewaySubnetId
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!Ref GatewaySecurityGroup]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        InstanceMetadataTags: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: !Ref DiskSizeGb, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          APP=hotelindoora
+          export HOME=/root
+          TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+          SVC="$(md tags/instance/Service)"
+          PORT="$(md tags/instance/Port)"
+          INSTANCE_ID="$(md instance-id)"
+          dnf install -y nodejs20 nginx amazon-cloudwatch-agent dnf-automatic
+          id app || useradd --system --home-dir /opt/$APP --shell /sbin/nologin app
+          mkdir -p /opt/$APP/releases /etc/$APP /var/log/$APP
+          touch /var/log/$APP/$SVC.log
+          chown -R app:app /opt/$APP /var/log/$APP
+          chmod 755 /opt/$APP
+          cat > /etc/nginx/nginx.conf <<'NGINX'
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+            include /etc/nginx/mime.types;
+            default_type application/octet-stream;
+            access_log /var/log/nginx/access.log;
+            sendfile on;
+            keepalive_timeout 65;
+            server {
+              listen 80 default_server;
+              server_name _;
+              client_max_body_size 8m;
+              location / {
+                proxy_pass http://127.0.0.1:PORT_PLACEHOLDER;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 60s;
+              }
+            }
+          }
+          NGINX
+          sed -i "s/PORT_PLACEHOLDER/$PORT/" /etc/nginx/nginx.conf
+          sed -i 's/^[[:space:]]\+//' /etc/nginx/nginx.conf
+          nginx -t
+          systemctl enable nginx
+          systemctl restart nginx
+          cat > /etc/systemd/system/$APP.service <<UNIT
+          [Unit]
+          Description=$APP ($SVC)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=app
+          WorkingDirectory=/opt/$APP/current
+          EnvironmentFile=/etc/$APP/env
+          ExecStart=/usr/bin/node packages/$SVC/src/server.js
+          Restart=always
+          RestartSec=3
+          NoNewPrivileges=true
+          StandardOutput=append:/var/log/$APP/$SVC.log
+          StandardError=append:/var/log/$APP/$SVC.log
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sed -i 's/^[[:space:]]\+//' /etc/systemd/system/$APP.service
+          systemctl daemon-reload
+          systemctl enable $APP
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CW
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/$APP/$SVC.log",
+                      "log_group_name": "/$APP/prod/$SVC",
+                      "log_stream_name": "{instance_id}",
+                      "retention_in_days": 30
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CW
+          sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+          ROOT_VOLUME=$(md block-device-mapping/root)
+          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
+          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
+            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
+          fi
+          sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
+          systemctl enable --now dnf-automatic.timer
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-gateway' }
+        - { Key: Service, Value: gateway }
+        - { Key: Port, Value: '4000' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: owner, Value: Ravindu200232 }
+
+  AuthInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: InstanceProfile
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref ServiceInstanceType
+      SubnetId: !Ref AuthSubnetId
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!Ref AuthSecurityGroup]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        InstanceMetadataTags: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: !Ref DiskSizeGb, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          APP=hotelindoora
+          export HOME=/root
+          TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+          SVC="$(md tags/instance/Service)"
+          PORT="$(md tags/instance/Port)"
+          INSTANCE_ID="$(md instance-id)"
+          dnf install -y nodejs20 nginx amazon-cloudwatch-agent dnf-automatic
+          id app || useradd --system --home-dir /opt/$APP --shell /sbin/nologin app
+          mkdir -p /opt/$APP/releases /etc/$APP /var/log/$APP
+          touch /var/log/$APP/$SVC.log
+          chown -R app:app /opt/$APP /var/log/$APP
+          chmod 755 /opt/$APP
+          cat > /etc/nginx/nginx.conf <<'NGINX'
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+            include /etc/nginx/mime.types;
+            default_type application/octet-stream;
+            access_log /var/log/nginx/access.log;
+            sendfile on;
+            keepalive_timeout 65;
+            server {
+              listen 80 default_server;
+              server_name _;
+              client_max_body_size 8m;
+              location / {
+                proxy_pass http://127.0.0.1:PORT_PLACEHOLDER;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 60s;
+              }
+            }
+          }
+          NGINX
+          sed -i "s/PORT_PLACEHOLDER/$PORT/" /etc/nginx/nginx.conf
+          sed -i 's/^[[:space:]]\+//' /etc/nginx/nginx.conf
+          nginx -t
+          systemctl enable nginx
+          systemctl restart nginx
+          cat > /etc/systemd/system/$APP.service <<UNIT
+          [Unit]
+          Description=$APP ($SVC)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=app
+          WorkingDirectory=/opt/$APP/current
+          EnvironmentFile=/etc/$APP/env
+          ExecStart=/usr/bin/node packages/$SVC/src/server.js
+          Restart=always
+          RestartSec=3
+          NoNewPrivileges=true
+          StandardOutput=append:/var/log/$APP/$SVC.log
+          StandardError=append:/var/log/$APP/$SVC.log
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sed -i 's/^[[:space:]]\+//' /etc/systemd/system/$APP.service
+          systemctl daemon-reload
+          systemctl enable $APP
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CW
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/$APP/$SVC.log",
+                      "log_group_name": "/$APP/prod/$SVC",
+                      "log_stream_name": "{instance_id}",
+                      "retention_in_days": 30
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CW
+          sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+          ROOT_VOLUME=$(md block-device-mapping/root)
+          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
+          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
+            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
+          fi
+          sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
+          systemctl enable --now dnf-automatic.timer
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-auth' }
+        - { Key: Service, Value: auth }
+        - { Key: Port, Value: '4001' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: owner, Value: Ravindu200232 }
+
+  RoomsInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: InstanceProfile
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref ServiceInstanceType
+      SubnetId: !Ref RoomsSubnetId
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!Ref RoomsSecurityGroup]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        InstanceMetadataTags: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: !Ref DiskSizeGb, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          APP=hotelindoora
+          export HOME=/root
+          TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+          SVC="$(md tags/instance/Service)"
+          PORT="$(md tags/instance/Port)"
+          INSTANCE_ID="$(md instance-id)"
+          dnf install -y nodejs20 nginx amazon-cloudwatch-agent dnf-automatic
+          id app || useradd --system --home-dir /opt/$APP --shell /sbin/nologin app
+          mkdir -p /opt/$APP/releases /etc/$APP /var/log/$APP
+          touch /var/log/$APP/$SVC.log
+          chown -R app:app /opt/$APP /var/log/$APP
+          chmod 755 /opt/$APP
+          cat > /etc/nginx/nginx.conf <<'NGINX'
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+            include /etc/nginx/mime.types;
+            default_type application/octet-stream;
+            access_log /var/log/nginx/access.log;
+            sendfile on;
+            keepalive_timeout 65;
+            server {
+              listen 80 default_server;
+              server_name _;
+              client_max_body_size 8m;
+              location / {
+                proxy_pass http://127.0.0.1:PORT_PLACEHOLDER;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 60s;
+              }
+            }
+          }
+          NGINX
+          sed -i "s/PORT_PLACEHOLDER/$PORT/" /etc/nginx/nginx.conf
+          sed -i 's/^[[:space:]]\+//' /etc/nginx/nginx.conf
+          nginx -t
+          systemctl enable nginx
+          systemctl restart nginx
+          cat > /etc/systemd/system/$APP.service <<UNIT
+          [Unit]
+          Description=$APP ($SVC)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=app
+          WorkingDirectory=/opt/$APP/current
+          EnvironmentFile=/etc/$APP/env
+          ExecStart=/usr/bin/node packages/$SVC/src/server.js
+          Restart=always
+          RestartSec=3
+          NoNewPrivileges=true
+          StandardOutput=append:/var/log/$APP/$SVC.log
+          StandardError=append:/var/log/$APP/$SVC.log
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sed -i 's/^[[:space:]]\+//' /etc/systemd/system/$APP.service
+          systemctl daemon-reload
+          systemctl enable $APP
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CW
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/$APP/$SVC.log",
+                      "log_group_name": "/$APP/prod/$SVC",
+                      "log_stream_name": "{instance_id}",
+                      "retention_in_days": 30
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CW
+          sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+          ROOT_VOLUME=$(md block-device-mapping/root)
+          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
+          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
+            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
+          fi
+          sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
+          systemctl enable --now dnf-automatic.timer
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-rooms' }
+        - { Key: Service, Value: rooms }
+        - { Key: Port, Value: '4002' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: owner, Value: Ravindu200232 }
+
+  BookingsInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: InstanceProfile
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref ServiceInstanceType
+      SubnetId: !Ref BookingsSubnetId
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!Ref BookingsSecurityGroup]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        InstanceMetadataTags: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: !Ref DiskSizeGb, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          APP=hotelindoora
+          export HOME=/root
+          TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+          SVC="$(md tags/instance/Service)"
+          PORT="$(md tags/instance/Port)"
+          INSTANCE_ID="$(md instance-id)"
+          dnf install -y nodejs20 nginx amazon-cloudwatch-agent dnf-automatic
+          id app || useradd --system --home-dir /opt/$APP --shell /sbin/nologin app
+          mkdir -p /opt/$APP/releases /etc/$APP /var/log/$APP
+          touch /var/log/$APP/$SVC.log
+          chown -R app:app /opt/$APP /var/log/$APP
+          chmod 755 /opt/$APP
+          cat > /etc/nginx/nginx.conf <<'NGINX'
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+            include /etc/nginx/mime.types;
+            default_type application/octet-stream;
+            access_log /var/log/nginx/access.log;
+            sendfile on;
+            keepalive_timeout 65;
+            server {
+              listen 80 default_server;
+              server_name _;
+              client_max_body_size 8m;
+              location / {
+                proxy_pass http://127.0.0.1:PORT_PLACEHOLDER;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 60s;
+              }
+            }
+          }
+          NGINX
+          sed -i "s/PORT_PLACEHOLDER/$PORT/" /etc/nginx/nginx.conf
+          sed -i 's/^[[:space:]]\+//' /etc/nginx/nginx.conf
+          nginx -t
+          systemctl enable nginx
+          systemctl restart nginx
+          cat > /etc/systemd/system/$APP.service <<UNIT
+          [Unit]
+          Description=$APP ($SVC)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=app
+          WorkingDirectory=/opt/$APP/current
+          EnvironmentFile=/etc/$APP/env
+          ExecStart=/usr/bin/node packages/$SVC/src/server.js
+          Restart=always
+          RestartSec=3
+          NoNewPrivileges=true
+          StandardOutput=append:/var/log/$APP/$SVC.log
+          StandardError=append:/var/log/$APP/$SVC.log
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sed -i 's/^[[:space:]]\+//' /etc/systemd/system/$APP.service
+          systemctl daemon-reload
+          systemctl enable $APP
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CW
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/$APP/$SVC.log",
+                      "log_group_name": "/$APP/prod/$SVC",
+                      "log_stream_name": "{instance_id}",
+                      "retention_in_days": 30
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CW
+          sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+          ROOT_VOLUME=$(md block-device-mapping/root)
+          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
+          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
+            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
+          fi
+          sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
+          systemctl enable --now dnf-automatic.timer
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-bookings' }
+        - { Key: Service, Value: bookings }
+        - { Key: Port, Value: '4003' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+        - { Key: owner, Value: Ravindu200232 }
+
+  GatewayEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref GatewayInstance
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  AuthEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AuthInstance
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  RoomsEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref RoomsInstance
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  BookingsEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref BookingsInstance
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  GatewayAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AppName}-${EnvName}-gateway-status'
+      AlarmDescription: Replace the gateway instance if its status checks fail.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{ Name: InstanceId, Value: !Ref GatewayInstance }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover']
+
+  AuthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AppName}-${EnvName}-auth-status'
+      AlarmDescription: Replace the auth instance if its status checks fail.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{ Name: InstanceId, Value: !Ref AuthInstance }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover']
+
+  RoomsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AppName}-${EnvName}-rooms-status'
+      AlarmDescription: Replace the rooms instance if its status checks fail.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{ Name: InstanceId, Value: !Ref RoomsInstance }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover']
+
+  BookingsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AppName}-${EnvName}-bookings-status'
+      AlarmDescription: Replace the bookings instance if its status checks fail.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{ Name: InstanceId, Value: !Ref BookingsInstance }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover']
+
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AppName}-${EnvName}-dlm'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: snapshot-this-applications-volumes
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ec2:CreateSnapshot, ec2:CreateTags, ec2:DeleteSnapshot, ec2:DescribeVolumes, ec2:DescribeSnapshots]
+                Resource: '*'
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  SnapshotPolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: !Sub '${AppName} ${EnvName} - seven daily snapshots of every tagged volume'
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
+      PolicyDetails:
+        ResourceTypes: [VOLUME]
+        TargetTags:
+          - { Key: Snapshot, Value: 'true' }
+        Schedules:
+          - Name: daily
+            CopyTags: true
+            CreateRule:
+              Interval: 24
+              IntervalUnit: HOURS
+              Times: ['03:00']
+            RetainRule:
+              Count: 7
+
+  # The free CloudFront address: a valid certificate with nothing for the hotel
+  # to set up. Caching is switched off, so the site and the API are always the
+  # origin's own answer.
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AppName} ${EnvName}'
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: gateway
+            DomainName: !GetAtt GatewayInstance.PublicDnsName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 30
+              HTTPPort: 80
+              HTTPSPort: 443
+        DefaultCacheBehavior:
+          TargetOriginId: gateway
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          Compress: true
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+      Tags:
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+Outputs:
+  GatewayInstanceId:
+    Value: !Ref GatewayInstance
+  AuthInstanceId:
+    Value: !Ref AuthInstance
+  RoomsInstanceId:
+    Value: !Ref RoomsInstance
+  BookingsInstanceId:
+    Value: !Ref BookingsInstance
+  GatewayElasticIp:
+    Value: !Ref GatewayEip
+  AuthElasticIp:
+    Value: !Ref AuthEip
+  RoomsElasticIp:
+    Value: !Ref RoomsEip
+  BookingsElasticIp:
+    Value: !Ref BookingsEip
+  GatewayPrivateDns:
+    Value: !Sub 'ip-${GatewayEip}.${AWS::Region}.compute.internal'
+  AuthPrivateDns:
+    Value: !Sub 'ip-${AuthEip}.${AWS::Region}.compute.internal'
+  RoomsPrivateDns:
+    Value: !Sub 'ip-${RoomsEip}.${AWS::Region}.compute.internal'
+  BookingsPrivateDns:
+    Value: !Sub 'ip-${BookingsEip}.${AWS::Region}.compute.internal'
+  ReleaseBucket:
+    Value: !Ref ReleaseBucket
+  SecretName:
+    Value: !Ref SecretName
+  DistributionId:
+    Value: !Ref Distribution
+  PublicUrl:
+    Value: !Sub 'https://${Distribution.DomainName}'
+  GatewayLogGroup:
+    Value: !Ref GatewayLogGroup
+  AuthLogGroup:
+    Value: !Ref AuthLogGroup
+  RoomsLogGroup:
+    Value: !Ref RoomsLogGroup
+  BookingsLogGroup:
+    Value: !Ref BookingsLogGroup
+  SnapshotPolicyId:
+    Value: !Ref SnapshotPolicy
