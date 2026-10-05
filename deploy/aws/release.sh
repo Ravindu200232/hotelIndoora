@@ -69,7 +69,10 @@ printf '%s' "$RAW" | node -e '
       bookings: ["BOOKINGS_PORT", "ROOMS_URL", "AUTH_URL", "PAYPAL_ENV"],
     };
     const keys = [...common, ...(per[service] ?? [])];
-    const lines = keys.filter((k) => all[k] !== undefined && all[k] !== "").map((k) => k + "=" + all[k]);
+    // Quoted: a value such as a connection string carries ? and &, which an
+    // unquoted assignment would split into a shell command. systemd reads
+    // quoted values from EnvironmentFile in exactly the same way.
+    const lines = keys.filter((k) => all[k] !== undefined && all[k] !== "").map((k) => k + "=" + JSON.stringify(String(all[k])));
     process.stdout.write(lines.join("\n") + "\n");
   });
 ' "$SERVICE" > "$ENV_FILE"
@@ -87,7 +90,7 @@ if [ "$SERVICE" = "auth" ]; then
     process.stdin.on("end", () => {
       const all = JSON.parse(input);
       const keys = ["MONGODB_URI", "EMAIL_PROVIDER", "EMAIL_API_KEY", "MAIL_FROM", "HOTEL_NAME", "SITE_URL", "STAFF_EMAIL", "STAFF_NAME"];
-      const lines = keys.filter((k) => all[k] !== undefined && all[k] !== "").map((k) => k + "=" + all[k]);
+      const lines = keys.filter((k) => all[k] !== undefined && all[k] !== "").map((k) => k + "=" + JSON.stringify(String(all[k])));
       process.stdout.write(lines.join("\n") + "\n");
     });
   ' > "/etc/$APP/seed.env"
