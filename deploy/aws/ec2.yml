@@ -210,14 +210,19 @@ Resources:
   AuthSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub '${AppName} ${EnvName} auth - port 80 from the gateway only'
+      GroupDescription: !Sub '${AppName} ${EnvName} auth - port 80 from the gateway and from this deployment own servers'
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           SourceSecurityGroupId: !Ref GatewaySecurityGroup
-          Description: the gateway only
+          Description: the gateway
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref VpcCidr
+          Description: the other servers of this deployment, which ask this service for data
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
@@ -230,14 +235,19 @@ Resources:
   RoomsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub '${AppName} ${EnvName} rooms - port 80 from the gateway only'
+      GroupDescription: !Sub '${AppName} ${EnvName} rooms - port 80 from the gateway and from this deployment own servers'
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           SourceSecurityGroupId: !Ref GatewaySecurityGroup
-          Description: the gateway only
+          Description: the gateway
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref VpcCidr
+          Description: the other servers of this deployment, which ask this service for data
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
@@ -250,14 +260,19 @@ Resources:
   BookingsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub '${AppName} ${EnvName} bookings - port 80 from the gateway only'
+      GroupDescription: !Sub '${AppName} ${EnvName} bookings - port 80 from the gateway and from this deployment own servers'
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           SourceSecurityGroupId: !Ref GatewaySecurityGroup
-          Description: the gateway only
+          Description: the gateway
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref VpcCidr
+          Description: the other servers of this deployment, which ask this service for data
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
