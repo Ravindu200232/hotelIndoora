@@ -1,0 +1,33 @@
+# The QA layers this repository runs on every push and pull request: the unit
+# suites and the production build. It deploys nothing - a release is made from a
+# developer's machine with the AWS CLI (see deploy/aws/README.md).
+name: quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: 'true'
+      # The service suites create, change and clear real records, so they need a
+      # database of their own. This secret points at the hotelIndoora cluster
+      # with a database name that ends in _test; the shared test helper refuses
+      # any other name, so the hotel's own data can never be touched from here.
+      TEST_MONGODB_URI: ${{ secrets.TEST_MONGODB_URI }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-report
+          path: test-report.json
