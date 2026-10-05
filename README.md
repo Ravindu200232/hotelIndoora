@@ -69,6 +69,8 @@ keys that service reads into `/etc/hotelindoora/env`.
 | `EMAIL_API_KEY` | the key that service sends with | yes — without it every message reports a clear failure and nothing is sent | server secret |
 | `MAIL_FROM` | the address the hotel's messages come from | yes | server |
 | `HOTEL_NAME` | the hotel's name in email subjects and headings | yes | server |
+| `SITE_URL` | the address the site is served on, with no trailing slash. Every link the app puts in an email (the confirmation link, the staff invitation, the payment link) and the address PayPal returns a guest to are built from it — unset, those links are relative and reach nobody | yes when deployed | server secret store; the CloudFront address of the deployment |
+| `STAFF_EMAIL`, `STAFF_NAME` | the hotel's own first staff sign-in, used only by `scripts/seed-production.mjs` to create the invitation | for the first deployment | read on the `auth` instance from its own seed environment file |
 | `SUPABASE_URL` | the Storage endpoint holding room-type photographs | for room photographs | server |
 | `SUPABASE_SERVICE_ROLE_KEY` | server-side key for that bucket — never in the browser, never a `VITE_` name | for room photographs | server secret |
 | `ROOM_PHOTOS_BUCKET` | the bucket's name (`room-type-photos`) | yes | server |
@@ -79,6 +81,7 @@ keys that service reads into `/etc/hotelindoora/env`.
 | `TEST_MONGODB_URI` | the database the unit suites use; its name must end in `_test` | for the tests | local, and a repository secret in CI |
 | `E2E_MONGODB_URI` | the database the end-to-end journeys use | for `npm run test:e2e` | local |
 | `BASE_URL` | where the browser-facing checks point | for the QA layers | local |
+| `VITE_SAMPLE_ACCOUNTS` | a build flag: `off` leaves the sample accounts and the review panel off the sign-in page, which is how a build for a real hotel is made. Unset, the local preview and the recorded visual baselines keep them | no | the build command (`VITE_SAMPLE_ACCOUNTS=off npm run build`) |
 
 Only variables meant for the browser may carry the framework's public prefix.
 This application has none: the client is built before it is served, and no secret
@@ -110,7 +113,7 @@ Manager — port 22 is never opened and there is no key pair.
 # 1. everything the deployment needs, as code, in one stack
 aws cloudformation deploy --template-file deploy/aws/ec2.yml --stack-name hotelindoora-prod \
   --capabilities CAPABILITY_NAMED_IAM --parameter-overrides file://deploy/aws/params.json \
-  --tags app=hotelindoora env=prod managed-by=agentforge owner=Ravindu200232 \
+  --tags app=hotelindoora env=prod managed-by=agentforge \
   --no-fail-on-empty-changeset --region ap-south-1 --profile agentforge-console
 
 # 2. the production starting data: the hotel's own details and the room types it
