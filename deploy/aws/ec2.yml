@@ -12,28 +12,25 @@ Parameters:
   EnvName:
     Type: String
     Default: prod
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-  GatewaySubnetId:
-    Type: AWS::EC2::Subnet::Id
-  AuthSubnetId:
-    Type: AWS::EC2::Subnet::Id
-  RoomsSubnetId:
-    Type: AWS::EC2::Subnet::Id
-  BookingsSubnetId:
-    Type: AWS::EC2::Subnet::Id
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  SubnetCidr:
+    Type: String
+    Default: 10.0.0.0/24
+  AvailabilityZone:
+    Type: String
+    Default: ap-south-1a
   CloudFrontOriginPrefixListId:
     Type: String
   ReleaseBucketName:
     Type: String
   SecretName:
     Type: String
-  GatewayInstanceType:
-    Type: String
-    Default: t4g.small
-  ServiceInstanceType:
+  InstanceType:
     Type: String
     Default: t4g.micro
+    Description: the size all four servers run at
   DiskSizeGb:
     Type: Number
     Default: 20
@@ -45,6 +42,73 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
 
 Resources:
+
+  # The network this deployment owns: one VPC, one public subnet in one zone and
+  # its own internet gateway, so an instance can reach the cluster and Systems
+  # Manager while the security groups still decide who may reach the instances.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-public' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${AppName}-${EnvName}-public' }
+        - { Key: app, Value: !Ref AppName }
+        - { Key: env, Value: !Ref EnvName }
+        - { Key: managed-by, Value: agentforge }
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
 
   ReleaseBucket:
     Type: AWS::S3::Bucket
@@ -107,10 +171,6 @@ Resources:
                 Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
                 Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AppName}/${EnvName}/*'
-              - Sid: TagOwnRootVolumeForSnapshots
-                Effect: Allow
-                Action: [ec2:CreateTags, ec2:DescribeVolumes]
-                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
       Tags:
         - { Key: app, Value: !Ref AppName }
         - { Key: env, Value: !Ref EnvName }
@@ -128,7 +188,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Sub '${AppName} ${EnvName} gateway - port 80 from CloudFront only'
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -151,7 +211,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Sub '${AppName} ${EnvName} auth - port 80 from the gateway only'
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -171,7 +231,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Sub '${AppName} ${EnvName} rooms - port 80 from the gateway only'
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -191,7 +251,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Sub '${AppName} ${EnvName} bookings - port 80 from the gateway only'
-      VpcId: !Ref VpcId
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -252,8 +312,9 @@ Resources:
     DependsOn: InstanceProfile
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: !Ref GatewayInstanceType
-      SubnetId: !Ref GatewaySubnetId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      PrivateIpAddress: 10.0.0.11
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [!Ref GatewaySecurityGroup]
       MetadataOptions:
@@ -356,11 +417,6 @@ Resources:
           CW
           sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
           /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-          ROOT_VOLUME=$(md block-device-mapping/root)
-          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
-          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
-            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
-          fi
           sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
           systemctl enable --now dnf-automatic.timer
       Tags:
@@ -370,15 +426,15 @@ Resources:
         - { Key: app, Value: !Ref AppName }
         - { Key: env, Value: !Ref EnvName }
         - { Key: managed-by, Value: agentforge }
-        - { Key: owner, Value: Ravindu200232 }
 
   AuthInstance:
     Type: AWS::EC2::Instance
     DependsOn: InstanceProfile
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: !Ref ServiceInstanceType
-      SubnetId: !Ref AuthSubnetId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      PrivateIpAddress: 10.0.0.12
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [!Ref AuthSecurityGroup]
       MetadataOptions:
@@ -481,11 +537,6 @@ Resources:
           CW
           sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
           /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-          ROOT_VOLUME=$(md block-device-mapping/root)
-          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
-          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
-            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
-          fi
           sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
           systemctl enable --now dnf-automatic.timer
       Tags:
@@ -495,15 +546,15 @@ Resources:
         - { Key: app, Value: !Ref AppName }
         - { Key: env, Value: !Ref EnvName }
         - { Key: managed-by, Value: agentforge }
-        - { Key: owner, Value: Ravindu200232 }
 
   RoomsInstance:
     Type: AWS::EC2::Instance
     DependsOn: InstanceProfile
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: !Ref ServiceInstanceType
-      SubnetId: !Ref RoomsSubnetId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      PrivateIpAddress: 10.0.0.13
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [!Ref RoomsSecurityGroup]
       MetadataOptions:
@@ -606,11 +657,6 @@ Resources:
           CW
           sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
           /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-          ROOT_VOLUME=$(md block-device-mapping/root)
-          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
-          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
-            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
-          fi
           sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
           systemctl enable --now dnf-automatic.timer
       Tags:
@@ -620,15 +666,15 @@ Resources:
         - { Key: app, Value: !Ref AppName }
         - { Key: env, Value: !Ref EnvName }
         - { Key: managed-by, Value: agentforge }
-        - { Key: owner, Value: Ravindu200232 }
 
   BookingsInstance:
     Type: AWS::EC2::Instance
     DependsOn: InstanceProfile
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: !Ref ServiceInstanceType
-      SubnetId: !Ref BookingsSubnetId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      PrivateIpAddress: 10.0.0.14
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [!Ref BookingsSecurityGroup]
       MetadataOptions:
@@ -731,11 +777,6 @@ Resources:
           CW
           sed -i 's/^[[:space:]]\+//' /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
           /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-          ROOT_VOLUME=$(md block-device-mapping/root)
-          VOLUME_ID=$(aws ec2 describe-volumes --filters Name=attachment.instance-id,Values="$INSTANCE_ID" Name=attachment.device,Values="$ROOT_VOLUME" --query "Volumes[0].VolumeId" --output text || true)
-          if [ -n "$VOLUME_ID" ] && [ "$VOLUME_ID" != "None" ]; then
-            aws ec2 create-tags --resources "$VOLUME_ID" --tags Key=Snapshot,Value=true Key=app,Value=$APP Key=env,Value=prod
-          fi
           sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf || true
           systemctl enable --now dnf-automatic.timer
       Tags:
@@ -745,7 +786,6 @@ Resources:
         - { Key: app, Value: !Ref AppName }
         - { Key: env, Value: !Ref EnvName }
         - { Key: managed-by, Value: agentforge }
-        - { Key: owner, Value: Ravindu200232 }
 
   GatewayEip:
     Type: AWS::EC2::EIP
@@ -851,54 +891,14 @@ Resources:
       TreatMissingData: breaching
       AlarmActions: [!Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover']
 
-  SnapshotRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${AppName}-${EnvName}-dlm'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: dlm.amazonaws.com }
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: snapshot-this-applications-volumes
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: [ec2:CreateSnapshot, ec2:CreateTags, ec2:DeleteSnapshot, ec2:DescribeVolumes, ec2:DescribeSnapshots]
-                Resource: '*'
-      Tags:
-        - { Key: app, Value: !Ref AppName }
-        - { Key: env, Value: !Ref EnvName }
-        - { Key: managed-by, Value: agentforge }
-
-  SnapshotPolicy:
-    Type: AWS::DLM::LifecyclePolicy
-    Properties:
-      Description: !Sub '${AppName} ${EnvName} - seven daily snapshots of every tagged volume'
-      State: ENABLED
-      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
-      PolicyDetails:
-        ResourceTypes: [VOLUME]
-        TargetTags:
-          - { Key: Snapshot, Value: 'true' }
-        Schedules:
-          - Name: daily
-            CopyTags: true
-            CreateRule:
-              Interval: 24
-              IntervalUnit: HOURS
-              Times: ['03:00']
-            RetainRule:
-              Count: 7
-
   # The free CloudFront address: a valid certificate with nothing for the hotel
   # to set up. Caching is switched off, so the site and the API are always the
   # origin's own answer.
+  # The Elastic IP is associated before the distribution is made, so the origin
+  # address CloudFront keeps is the one that never moves.
   Distribution:
     Type: AWS::CloudFront::Distribution
+    DependsOn: GatewayEip
     Properties:
       DistributionConfig:
         Enabled: true
@@ -935,6 +935,18 @@ Resources:
         - { Key: managed-by, Value: agentforge }
 
 Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  PublicSubnetId:
+    Value: !Ref PublicSubnet
+  GatewayPrivateIp:
+    Value: 10.0.0.11
+  AuthPrivateIp:
+    Value: 10.0.0.12
+  RoomsPrivateIp:
+    Value: 10.0.0.13
+  BookingsPrivateIp:
+    Value: 10.0.0.14
   GatewayInstanceId:
     Value: !Ref GatewayInstance
   AuthInstanceId:
@@ -975,5 +987,3 @@ Outputs:
     Value: !Ref RoomsLogGroup
   BookingsLogGroup:
     Value: !Ref BookingsLogGroup
-  SnapshotPolicyId:
-    Value: !Ref SnapshotPolicy

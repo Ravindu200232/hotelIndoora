@@ -4,8 +4,11 @@
 # It never prints a secret: the environment file is written straight from
 # Secrets Manager and is readable only by root.
 #
-#   release.sh <service> <s3-key> <secret-name> <region> <bucket> <port>
+#   release.sh <service> <s3-key> <secret-name> <region> <bucket> <port> [sha256]
 #
+# The optional seventh argument is the artifact's SHA-256, computed on the
+# machine that built it: when it is given, the release is refused unless the
+# bytes that arrived are the bytes that were built.
 set -euo pipefail
 
 APP=hotelindoora
@@ -30,8 +33,22 @@ mkdir -p "$RELEASES"
 if [ ! -d "$TARGET" ]; then
   mkdir -p "$TARGET"
   aws s3 cp "s3://$BUCKET/$RELEASE_KEY" "/tmp/$ID.tar.gz" --region "$REGION" --only-show-errors
+  # The release was hashed on the machine that built it; what arrived has to be
+  # the same bytes before it is unpacked.
+  if [ -n "${7:-}" ]; then
+    GOT="$(sha256sum "/tmp/$ID.tar.gz" | awk '{print $1}')"
+    if [ "$GOT" != "$7" ]; then
+      echo "the release artifact is not the one that was built (expected $7, got $GOT)"; rm -f "/tmp/$ID.tar.gz"; exit 1
+    fi
+  fi
   tar -xzf "/tmp/$ID.tar.gz" -C "$TARGET"
   rm -f "/tmp/$ID.tar.gz"
+fi
+if [ ! -d "$TARGET/node_modules" ]; then
+  # Dependencies are installed here, for Linux, from the lockfile the release
+  # carries: a node_modules built on a developer's machine would be the wrong
+  # platform. The heap is capped because these servers are small.
+  ( cd "$TARGET" && NODE_OPTIONS=--max-old-space-size=384 npm ci --omit=dev --no-audit --no-fund --loglevel=error )
 fi
 chown -R app:app "$TARGET"
 
@@ -44,7 +61,7 @@ printf '%s' "$RAW" | node -e '
   process.stdin.on("end", () => {
     const all = JSON.parse(input);
     const service = process.argv[1];
-    const common = ["MONGODB_URI", "SESSION_SECRET", "NODE_ENV", "HOTEL_NAME", "EMAIL_PROVIDER", "EMAIL_API_KEY", "MAIL_FROM"];
+    const common = ["MONGODB_URI", "SESSION_SECRET", "NODE_ENV", "HOTEL_NAME", "EMAIL_PROVIDER", "EMAIL_API_KEY", "MAIL_FROM", "SITE_URL"];
     const per = {
       gateway: ["PORT", "AUTH_URL", "ROOMS_URL", "BOOKINGS_URL"],
       auth: ["AUTH_PORT", "BOOKINGS_URL"],
@@ -58,6 +75,25 @@ printf '%s' "$RAW" | node -e '
 ' "$SERVICE" > "$ENV_FILE"
 chown root:root "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+
+# ---- the first-staff-account seed, on the auth server only -------------------
+# The production seed runs on this one server, from an address the cluster
+# already allows, so it is given its own small environment file. Still root-only,
+# still 600, and still never printed.
+if [ "$SERVICE" = "auth" ]; then
+  printf '%s' "$RAW" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => { input += chunk; });
+    process.stdin.on("end", () => {
+      const all = JSON.parse(input);
+      const keys = ["MONGODB_URI", "EMAIL_PROVIDER", "EMAIL_API_KEY", "MAIL_FROM", "HOTEL_NAME", "SITE_URL", "STAFF_EMAIL", "STAFF_NAME"];
+      const lines = keys.filter((k) => all[k] !== undefined && all[k] !== "").map((k) => k + "=" + all[k]);
+      process.stdout.write(lines.join("\n") + "\n");
+    });
+  ' > "/etc/$APP/seed.env"
+  chown root:root "/etc/$APP/seed.env"
+  chmod 600 "/etc/$APP/seed.env"
+fi
 
 # ---- switch the release and restart -----------------------------------------
 ln -sfn "$TARGET" "$CURRENT"
