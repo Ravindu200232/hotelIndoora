@@ -70,7 +70,7 @@ export function createTeamRouter(config) {
             hotelName: config.mail.hotelName,
             fullName: member.full_name,
             invitedBy: req.user.name || 'A colleague',
-            link: inviteLink(token),
+            link: inviteLink(token, config.siteUrl),
           }) },
           config,
         );
@@ -113,7 +113,7 @@ export function createTeamRouter(config) {
             hotelName: config.mail.hotelName,
             fullName: member.full_name,
             invitedBy: req.user.name || 'A colleague',
-            link: inviteLink(token),
+            link: inviteLink(token, config.siteUrl),
           }) },
           config,
         );

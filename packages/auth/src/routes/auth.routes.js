@@ -68,7 +68,7 @@ export function createAuthRouter(config) {
           { to: account.email, ...confirmationEmail({
             hotelName: config.mail.hotelName,
             fullName: account.full_name,
-            link: confirmationLink(token),
+            link: confirmationLink(token, config.siteUrl),
           }) },
           config,
         );
@@ -138,7 +138,7 @@ export function createAuthRouter(config) {
           { to: account.email, ...confirmationEmail({
             hotelName: config.mail.hotelName,
             fullName: account.full_name,
-            link: confirmationLink(token),
+            link: confirmationLink(token, config.siteUrl),
           }) },
           config,
         );

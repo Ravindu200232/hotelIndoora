@@ -7,6 +7,10 @@ export function loadConfig(env = process.env) {
   return {
     port: Number(env.SERVICE_PORT ?? env.AUTH_PORT ?? 4001),
     mongoUri: env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/examplehotel',
+    // The address the site is served on. Every link this service puts in an
+    // email is built from it, because a link without a host is a dead link in a
+    // mail client: /confirm-email?token=... reaches nobody.
+    siteUrl: String(env.SITE_URL ?? '').trim().replace(/\/+$/, ''),
     // The account deletion is the only thing here that touches another service:
     // a guest's future bookings must be cancelled and refunded before any
     // personal detail is erased, and that is the bookings service's job.
