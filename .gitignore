@@ -1,0 +1,15 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+
+# The studio's own record (conversation, plans, evidence) is never published
+.agentforge/
+
+# QA output
+test-results/
+playwright-report/
+.lighthouseci/
+
+supabase/.temp/
