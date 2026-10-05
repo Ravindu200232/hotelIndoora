@@ -1,0 +1,4 @@
+# Shell scripts are run on Linux, so they are always stored and checked out with
+# LF endings: a carriage return at the end of `set -euo pipefail` makes bash
+# refuse the option and every release on the server fails.
+*.sh text eol=lf
