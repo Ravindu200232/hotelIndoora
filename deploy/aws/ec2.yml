@@ -138,7 +138,7 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
-          Description: outbound to the database, Systems Manager and this application's services
+          Description: outbound to the database, Systems Manager and the services
       Tags:
         - { Key: app, Value: !Ref AppName }
         - { Key: env, Value: !Ref EnvName }
@@ -793,7 +793,7 @@ Resources:
       AlarmName: !Sub '${AppName}-${EnvName}-gateway-status'
       AlarmDescription: Replace the gateway instance if its status checks fail.
       Namespace: AWS/EC2
-      MetricName: StatusCheckFailed
+      MetricName: StatusCheckFailed_System
       Dimensions: [{ Name: InstanceId, Value: !Ref GatewayInstance }]
       Statistic: Maximum
       Period: 300
@@ -809,7 +809,7 @@ Resources:
       AlarmName: !Sub '${AppName}-${EnvName}-auth-status'
       AlarmDescription: Replace the auth instance if its status checks fail.
       Namespace: AWS/EC2
-      MetricName: StatusCheckFailed
+      MetricName: StatusCheckFailed_System
       Dimensions: [{ Name: InstanceId, Value: !Ref AuthInstance }]
       Statistic: Maximum
       Period: 300
@@ -825,7 +825,7 @@ Resources:
       AlarmName: !Sub '${AppName}-${EnvName}-rooms-status'
       AlarmDescription: Replace the rooms instance if its status checks fail.
       Namespace: AWS/EC2
-      MetricName: StatusCheckFailed
+      MetricName: StatusCheckFailed_System
       Dimensions: [{ Name: InstanceId, Value: !Ref RoomsInstance }]
       Statistic: Maximum
       Period: 300
@@ -841,7 +841,7 @@ Resources:
       AlarmName: !Sub '${AppName}-${EnvName}-bookings-status'
       AlarmDescription: Replace the bookings instance if its status checks fail.
       Namespace: AWS/EC2
-      MetricName: StatusCheckFailed
+      MetricName: StatusCheckFailed_System
       Dimensions: [{ Name: InstanceId, Value: !Ref BookingsInstance }]
       Statistic: Maximum
       Period: 300
