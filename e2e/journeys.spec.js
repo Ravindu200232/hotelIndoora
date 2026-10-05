@@ -429,8 +429,12 @@ test('[UJ-008] Staff run the bookings', async ({ page }) => {
     await page.getByRole('button', { name: 'Check availability' }).click()
     await expect(page.locator('input[type="radio"]:not([disabled])').first()).toBeVisible()
     await page.getByRole('button', { name: 'Confirm change' }).click()
-    await expect(page.getByText('Booking changed')).toBeVisible()
-    await expect(page.getByText(/Nothing further was due|charged through PayPal|refunded through PayPal/)).toBeVisible()
+    // The settlement sentence and the page's own explanatory hint both carry
+    // "refunded through PayPal", so the answer is read from the alert itself
+    // rather than from any text on the page.
+    const changed = page.locator('.alert').filter({ hasText: 'Booking changed' })
+    await expect(changed).toBeVisible()
+    await expect(changed).toContainText(/Nothing further was due|charged through PayPal|refunded through PayPal/)
   })
 
   await test.step('S05 Bookings shows the updated stay', async () => {
@@ -576,5 +580,77 @@ test('[UJ-011] Staff keep the hotel\'s public details current', async ({ page })
     await page.goto('/staff/hotel')
     await expect(page.getByLabel('Check-in time')).toHaveValue('12:00')
     await expect(page.getByLabel('Check-out time')).toHaveValue('13:00')
+  })
+})
+
+/**
+ * The invitation token the new account holds, read from the QA database this run
+ * owns (with-server.mjs gives every run its own `_e2e` database). The token is
+ * what the invitation email carries; no mail provider is connected in this
+ * environment, so the email cannot be opened and the account's own record is
+ * where the link it would have carried is kept.
+ */
+async function staffInviteToken(email) {
+  const uri = process.env.E2E_MONGODB_URI
+  if (!uri) throw new Error('this journey needs the QA database the run owns (E2E_MONGODB_URI)')
+  const { default: mongoose } = await import('mongoose')
+  const connection = await mongoose.createConnection(uri, { serverSelectionTimeoutMS: 10_000 }).asPromise()
+  try {
+    const member = await connection.collection('staffaccounts').findOne({ email })
+    return member?.invite_token ?? null
+  } finally {
+    await connection.close()
+  }
+}
+
+test.describe('a colleague who accepts the invitation', () => {
+  // 401: the session probe on the sign-in page. 404: the server's refusal of a
+  // spent invitation, which the page shows in its own words.
+  test.use({ allowedStatuses: [401, 404] })
+
+  test('[UJ-010] A colleague is added and sets a password of their own', async ({ page }) => {
+    const email = `colleague.${stamp}@example.com`
+    let token = null
+
+  await test.step('S00 the desk signs in and adds a colleague by name and email address', async () => {
+    await signIn(page, 'hotel_staff')
+    await page.goto('/staff/team/new')
+    await page.getByLabel('Full name').fill('Hana Suzuki')
+    await page.getByLabel('Email address').fill(email)
+    await page.getByRole('button', { name: 'Save and send invitation' }).click()
+    // No mail provider is connected here, so the account is created and the page
+    // says the invitation did not go out rather than claiming it was sent.
+    await expect(page.getByText(/Invitation sent|invitation email was not sent/).first()).toBeVisible()
+    await expect(page.getByText(email).first()).toBeVisible()
+  })
+
+  await test.step('S01 the invitation link opens the step where the colleague sets their own password', async () => {
+    token = await staffInviteToken(email)
+    expect(token, 'the invitation token is held against the new account').toBeTruthy()
+    await page.goto(`/login?invite=${token}`)
+    await expect(page.getByRole('heading', { name: 'Set your password' })).toBeVisible()
+    await page.getByLabel('New password').fill('Harbour-2026')
+    await page.getByLabel('Confirm your password').fill('Harbour-2026')
+    await page.getByRole('button', { name: /Set my password/ }).click()
+  })
+
+  await test.step('S02 the colleague arrives on the staff dashboard with the same full access as everyone', async () => {
+    await page.waitForURL(url => new URL(url).pathname === '/staff')
+    await expect(page.getByText('Hana Suzuki').first()).toBeVisible()
+    await page.goto('/staff/team')
+    await expect(page.getByText(email).first()).toBeVisible()
+  })
+
+  await test.step('the link works once: using it again is refused', async () => {
+    // Signed in as the colleague now, the spent link is opened again and the same
+    // form is filled in: the server refuses the token, and the page says so in its
+    // own words instead of setting a password.
+    await page.goto(`/login?invite=${token}`)
+    await expect(page.getByRole('heading', { name: 'Set your password' })).toBeVisible()
+    await page.getByLabel('New password').fill('Harbour-2027')
+    await page.getByLabel('Confirm your password').fill('Harbour-2027')
+    await page.getByRole('button', { name: /Set my password/ }).click()
+    await expect(page.getByText(/invitation has already been used|invitation has run out/i).first()).toBeVisible()
+  })
   })
 })
