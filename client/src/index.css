@@ -1,0 +1,25 @@
+/* Tailwind's own layers sit underneath the design system: the prototype's
+   stylesheet (src/styles/app.css) is imported after this file in main.jsx, so
+   its tokens, type scale and components win wherever the two overlap. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The bridge the Tailwind theme reads. The values themselves are declared once,
+   in src/styles/app.css, exactly as the approved design has them. */
+:root {
+  --background: var(--color-page);
+  --text: var(--color-ink);
+  --border: var(--color-line);
+  --primary: var(--color-primary);
+  --on-primary: var(--color-white);
+  --accent: var(--color-secondary);
+  --radius: var(--radius-sm);
+}
+
+/* Page-level styles the prototype carries on the blocked dates screen itself,
+   brought across so that list reads the same in the application. */
+.blocks-table th { white-space: normal; }
+.blocks-table th,
+.blocks-table td { padding-inline: var(--space-3); }
+.blocks-table .row-actions { justify-content: flex-end; }
