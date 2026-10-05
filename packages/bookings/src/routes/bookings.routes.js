@@ -11,6 +11,7 @@ import { confirmBooking } from '../lib/confirm.js';
 import { freeRoomsFor, guestOf, roomTypeOf } from '../lib/clients.js';
 import { bookingChangedEmail, bookingCancelledEmail, sendMail } from '../lib/mailer.js';
 import { hotelDetailsOf } from '../lib/clients.js';
+import { siteBase } from '../lib/links.js';
 
 /**
  * The guest's own bookings: booking a room, paying for it, changing it, and
@@ -115,8 +116,8 @@ export function createGuestBookingsRouter(config) {
         const order = await createOrder(config, {
           amount: booking.total_price,
           reference: String(booking._id),
-          returnUrl: `${req.protocol}://${req.get('host')}/bookings/new/payment?order=${booking._id}`,
-          cancelUrl: `${req.protocol}://${req.get('host')}/bookings/new/payment?cancelled=1`,
+          returnUrl: `${siteBase(config, req)}/bookings/new/payment?order=${booking._id}`,
+          cancelUrl: `${siteBase(config, req)}/bookings/new/payment?cancelled=1`,
         });
         booking.paypal_order_id = order.id;
         await booking.save();
@@ -193,8 +194,8 @@ export function createGuestBookingsRouter(config) {
         const order = await createOrder(config, {
           amount: booking.total_price,
           reference: String(booking._id),
-          returnUrl: `${req.protocol}://${req.get('host')}/bookings/new/payment?booking_id=${booking._id}`,
-          cancelUrl: `${req.protocol}://${req.get('host')}/bookings/new/payment?booking_id=${booking._id}&cancelled=1`,
+          returnUrl: `${siteBase(config, req)}/bookings/new/payment?booking_id=${booking._id}`,
+          cancelUrl: `${siteBase(config, req)}/bookings/new/payment?booking_id=${booking._id}&cancelled=1`,
         });
         booking.paypal_order_id = order.id;
         await booking.save();
@@ -312,8 +313,8 @@ export function createGuestBookingsRouter(config) {
                 amount: settled.amount,
                 reference: String(booking._id),
                 // Back to the change itself, where the difference is collected.
-                returnUrl: `${req.protocol}://${req.get('host')}/my-bookings/${booking._id}/change?settling=1`,
-                cancelUrl: `${req.protocol}://${req.get('host')}/my-bookings/${booking._id}/change?settled=0`,
+                returnUrl: `${siteBase(config, req)}/my-bookings/${booking._id}/change?settling=1`,
+                cancelUrl: `${siteBase(config, req)}/my-bookings/${booking._id}/change?settled=0`,
               });
               await Payment.create({
                 booking_id: booking._id,

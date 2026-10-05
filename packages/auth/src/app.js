@@ -16,6 +16,10 @@ import { MailError } from './lib/mailer.js';
 export function createApp(config) {
   const app = express();
   app.disable('x-powered-by');
+  // One reverse proxy stands in front of this service (nginx, and CloudFront on
+  // the gateway), so the forwarded protocol and host are trusted exactly one hop
+  // back and the service reads https and the site's own name, not the origin's.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '200kb' }));
 
   // Readiness is about this process only.

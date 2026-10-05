@@ -10,6 +10,7 @@ import { confirmBooking } from '../lib/confirm.js';
 import { createReference } from '../lib/reference.js';
 import { freeRoomsFor, roomTypeOf, hotelDetailsOf } from '../lib/clients.js';
 import { bookingChangedEmail, paymentLinkEmail, bookingCancelledEmail, sendMail } from '../lib/mailer.js';
+import { siteBase } from '../lib/links.js';
 
 const PER_PAGE = 25;
 const startOfToday = () => new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
@@ -141,7 +142,7 @@ export function createStaffBookingsRouter(config) {
         link = await createPaymentLink(config, {
           amount: booking.total_price,
           reference: String(booking._id),
-          returnUrl: `${req.protocol}://${req.get('host')}/bookings/${booking._id}/paid`,
+          returnUrl: `${siteBase(config, req)}/bookings/${booking._id}/paid`,
         });
         booking.paypal_order_id = link.orderId;
         booking.payment_link_sent_at = new Date();
@@ -219,7 +220,7 @@ export function createStaffBookingsRouter(config) {
               const order = await createOrder(config, {
                 amount: settled.amount,
                 reference: String(booking._id),
-                returnUrl: `${req.protocol}://${req.get('host')}/bookings/${booking._id}/paid`,
+                returnUrl: `${siteBase(config, req)}/bookings/${booking._id}/paid`,
               });
               await Payment.create({
                 booking_id: booking._id, paypal_transaction_id: order.id, amount: settled.amount,
@@ -375,7 +376,7 @@ export function createStaffBookingsRouter(config) {
         link = await createPaymentLink(config, {
           amount: booking.total_price,
           reference: String(booking._id),
-          returnUrl: `${req.protocol}://${req.get('host')}/bookings/${booking._id}/paid`,
+          returnUrl: `${siteBase(config, req)}/bookings/${booking._id}/paid`,
         });
       } catch (error) {
         return res.status(502).json({

@@ -38,6 +38,9 @@ export function createApp(config = {}) {
 
   const app = express();
   app.disable('x-powered-by');
+  // nginx and CloudFront stand in front of the gateway, so the forwarded
+  // protocol and host are trusted exactly one hop back.
+  app.set('trust proxy', 1);
   // The gateway is the only public door, so it is where response headers are set.
   const frameAncestors = process.env.FRAME_ANCESTORS?.trim() || "'none'";
   app.use((req, res, next) => {

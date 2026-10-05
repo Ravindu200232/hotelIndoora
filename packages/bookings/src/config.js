@@ -6,6 +6,10 @@ export function loadConfig(env = process.env) {
   return {
     port: Number(env.SERVICE_PORT ?? env.BOOKINGS_PORT ?? 4003),
     mongoUri: env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/examplehotel',
+    // The address the site is served on. PayPal returns the guest to it after a
+    // payment, so it must be the address the guest really sees - behind nginx
+    // and CloudFront the request's own host is the origin, not the site.
+    siteUrl: String(env.SITE_URL ?? '').trim().replace(/\/+$/, ''),
     // Room types, availability and the hotel's details belong to the rooms
     // service; the guest's own name and confirmation state belong to auth.
     roomsUrl: env.ROOMS_URL ?? `http://127.0.0.1:${env.ROOMS_PORT ?? 4002}`,

@@ -17,6 +17,10 @@ import { PayPalError } from './lib/paypal.js';
 export function createApp(config) {
   const app = express();
   app.disable('x-powered-by');
+  // One reverse proxy stands in front of this service (nginx, and CloudFront on
+  // the way in), so the forwarded protocol and host are trusted exactly one hop
+  // back: the PayPal return address is then the site's own https address.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '200kb' }));
 
   app.get('/health', (req, res) => res.json({ ok: true, service: 'bookings' }));

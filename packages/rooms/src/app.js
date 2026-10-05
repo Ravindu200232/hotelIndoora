@@ -17,6 +17,9 @@ import { StorageError } from './lib/storage.js';
 export function createApp(config) {
   const app = express();
   app.disable('x-powered-by');
+  // One reverse proxy stands in front of this service, so the forwarded protocol
+  // and host are trusted exactly one hop back.
+  app.set('trust proxy', 1);
   // Photographs arrive as base64 JSON, so the body limit is generous on purpose.
   app.use(express.json({ limit: '8mb' }));
 
